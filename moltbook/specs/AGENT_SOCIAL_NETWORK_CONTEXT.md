@@ -41,6 +41,321 @@ LoopCore is a Python-based agentic loop framework that enables AI agents to:
 └─────────────────────────────────────────────────────┘
 ```
 
+### How the Agentic Loop Works
+
+The agentic loop is the core execution engine that enables autonomous multi-step task completion. It's a cycle that continues until the task is done or safety limits are reached.
+
+#### The Basic Cycle
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    AGENTIC LOOP CYCLE                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. BUILD CONTEXT                                           │
+│     ├── System prompt (agent identity, rules)              │
+│     ├── Skill instructions (from skill.md)                 │
+│     ├── Memory context (relevant past info)                │
+│     └── Conversation history                               │
+│                      │                                      │
+│                      ▼                                      │
+│  2. LLM INFERENCE                                          │
+│     ├── Send context + available tools to LLM              │
+│     └── LLM returns: text AND/OR tool calls                │
+│                      │                                      │
+│                      ▼                                      │
+│  3. DECISION POINT                                         │
+│     ├── If tool calls → Execute tools, go to step 4       │
+│     └── If no tool calls → Task complete, EXIT             │
+│                      │                                      │
+│                      ▼                                      │
+│  4. TOOL EXECUTION                                         │
+│     ├── Execute each tool call                             │
+│     ├── Collect results (success/failure/output)           │
+│     └── Handle errors gracefully                           │
+│                      │                                      │
+│                      ▼                                      │
+│  5. RESULT INJECTION                                       │
+│     ├── Add tool results to conversation                   │
+│     └── Return to step 1 (LOOP)                           │
+│                                                             │
+│  SAFETY LIMITS:                                            │
+│  • Max turns (e.g., 50) → Prevent infinite loops           │
+│  • Timeout (e.g., 10 min) → Prevent hung tasks            │
+│  • Token budget → Prevent cost overrun                     │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Loop Algorithm (Pseudocode)
+
+```python
+def execute_agentic_loop(user_message, context):
+    conversation = [user_message]
+
+    for turn in range(1, MAX_TURNS + 1):
+
+        # Check safety limits
+        if elapsed_time > TIMEOUT:
+            return Result(status="timeout")
+
+        # Build full context
+        full_prompt = build_context(
+            system_prompt,      # Who the agent is
+            skill_instructions, # What it should do
+            memory_context,     # What it remembers
+            conversation        # What's happened so far
+        )
+
+        # Call the LLM
+        response = llm.complete(
+            messages=full_prompt,
+            tools=available_tools
+        )
+
+        # Check for tool calls
+        if response.has_tool_calls:
+
+            # Execute each tool
+            for tool_call in response.tool_calls:
+                result = execute_tool(tool_call)
+                conversation.append(tool_result)
+
+            # Loop continues - LLM needs to see results
+
+        else:
+            # No tool calls = LLM is done
+            return Result(
+                status="completed",
+                response=response.text
+            )
+
+    # Reached max turns
+    return Result(status="max_turns_exceeded")
+```
+
+#### What Happens Each Turn
+
+**Turn 1: Initial Request**
+```
+User: "Find all Python files with TODO comments"
+
+LLM thinks: I need to search for files
+LLM calls: glob_search(pattern="**/*.py")
+```
+
+**Turn 2: Process Results**
+```
+Tool result: ["app.py", "utils.py", "tests/test_main.py"]
+
+LLM thinks: Now I need to search each file for TODOs
+LLM calls: grep_search(pattern="TODO", files=["app.py", "utils.py", ...])
+```
+
+**Turn 3: Synthesize**
+```
+Tool result: [
+  "app.py:45: # TODO: Add error handling",
+  "utils.py:12: # TODO: Optimize this loop"
+]
+
+LLM thinks: I have the results, time to respond
+LLM responds: "Found 2 TODO comments:
+  1. app.py line 45: Add error handling
+  2. utils.py line 12: Optimize this loop"
+
+No tool calls → Loop exits
+```
+
+#### Context Building
+
+Each turn, the context is assembled from multiple sources:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      CONTEXT ASSEMBLY                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  SYSTEM PROMPT (always first)                              │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ You are [Agent Name], a helpful assistant.          │   │
+│  │ Your capabilities: [list of tools]                  │   │
+│  │ Your constraints: [safety rules]                    │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                           +                                 │
+│  SKILL INSTRUCTIONS (if skill is active)                   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ # Skill: Social Network Participation               │   │
+│  │ ## Instructions                                      │   │
+│  │ 1. Check feed for new posts                         │   │
+│  │ 2. Evaluate content quality                         │   │
+│  │ 3. Contribute if you have value to add              │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                           +                                 │
+│  MEMORY CONTEXT (retrieved relevant memories)              │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ Relevant memories:                                   │   │
+│  │ - User prefers concise responses                    │   │
+│  │ - Last task: researched WebSocket patterns          │   │
+│  │ - Learned: Check dates on Stack Overflow answers    │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                           +                                 │
+│  CONVERSATION HISTORY (current session)                    │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ User: "Find TODO comments"                          │   │
+│  │ Assistant: [tool call: glob_search]                 │   │
+│  │ Tool: ["app.py", "utils.py", ...]                   │   │
+│  │ Assistant: [tool call: grep_search]                 │   │
+│  │ Tool: ["app.py:45: TODO...", ...]                   │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Tool Execution Model
+
+Tools are functions the LLM can call. Each tool has:
+
+```python
+@dataclass
+class Tool:
+    name: str           # "file_read"
+    description: str    # "Read contents of a file"
+    parameters: [       # What arguments it takes
+        {"name": "path", "type": "string", "required": True},
+        {"name": "limit", "type": "integer", "required": False}
+    ]
+    execute: Callable   # The actual function
+
+# Tool registration
+tools = {
+    "file_read": Tool(
+        name="file_read",
+        description="Read contents of a file",
+        parameters=[...],
+        execute=lambda path, limit=None: read_file(path, limit)
+    ),
+    "file_write": Tool(...),
+    "web_search": Tool(...),
+    "memory_store": Tool(...),
+    # ... more tools
+}
+```
+
+**Tool execution flow:**
+```
+LLM requests: {"tool": "file_read", "args": {"path": "config.json"}}
+                                    │
+                                    ▼
+              ┌─────────────────────────────────────┐
+              │           TOOL EXECUTOR             │
+              ├─────────────────────────────────────┤
+              │ 1. Validate tool exists            │
+              │ 2. Validate parameters             │
+              │ 3. Check permissions (sandbox)     │
+              │ 4. Execute function                │
+              │ 5. Capture output or error         │
+              │ 6. Format result for LLM           │
+              └─────────────────────────────────────┘
+                                    │
+                                    ▼
+Result: {"status": "success", "output": "{\"key\": \"value\"}"}
+```
+
+#### Level 2 Capabilities Integration
+
+The Level 2 capabilities are woven into the loop:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              AGENTIC LOOP + LEVEL 2 CAPABILITIES            │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  EACH TURN:                                                 │
+│                                                             │
+│  ┌─────────────────┐    ┌─────────────────┐                │
+│  │   REFLECTION    │    │    PLANNING     │                │
+│  │                 │    │                 │                │
+│  │ • Am I stuck?   │    │ • What's next?  │                │
+│  │ • Is this       │    │ • Dependencies? │                │
+│  │   working?      │    │ • Parallel?     │                │
+│  │ • Should I stop?│    │ • Revise plan?  │                │
+│  └────────┬────────┘    └────────┬────────┘                │
+│           │                      │                          │
+│           └──────────┬───────────┘                          │
+│                      │                                      │
+│                      ▼                                      │
+│           ┌─────────────────────┐                          │
+│           │    LLM INFERENCE    │                          │
+│           │   (with tool calls) │                          │
+│           └──────────┬──────────┘                          │
+│                      │                                      │
+│           ┌──────────┴───────────┐                          │
+│           │                      │                          │
+│           ▼                      ▼                          │
+│  ┌─────────────────┐    ┌─────────────────┐                │
+│  │    LEARNING     │    │   CONFIDENCE    │                │
+│  │                 │    │                 │                │
+│  │ • Store pattern │    │ • How sure?     │                │
+│  │ • Recall past   │    │ • Should I ask? │                │
+│  │ • Update memory │    │ • Express doubt │                │
+│  └─────────────────┘    └─────────────────┘                │
+│                                                             │
+│  CAPABILITY TRIGGERS:                                       │
+│  • Reflection: After failures, every N turns, on confusion │
+│  • Planning: At task start, on requirement change          │
+│  • Learning: On success, on failure, on new information    │
+│  • Confidence: On claims, on uncertainty, on decisions     │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Context Window Management
+
+When conversations get too long, compaction is applied:
+
+```
+BEFORE COMPACTION (too long):
+┌────────────────────────────────────────┐
+│ System prompt                          │ KEEP
+├────────────────────────────────────────┤
+│ Turn 1: User request                   │
+│ Turn 2: Tool calls, results            │
+│ Turn 3: More tool calls                │  SUMMARIZE
+│ Turn 4: Tool calls                     │  INTO
+│ Turn 5: Results                        │  1 MESSAGE
+│ Turn 6: More work                      │
+├────────────────────────────────────────┤
+│ Turn 7: Recent work                    │
+│ Turn 8: Recent work                    │ KEEP
+│ Turn 9: Current state                  │
+└────────────────────────────────────────┘
+
+AFTER COMPACTION:
+┌────────────────────────────────────────┐
+│ System prompt                          │
+├────────────────────────────────────────┤
+│ [Summary: Earlier, the agent searched  │
+│  for files and found 3 matches...]     │
+├────────────────────────────────────────┤
+│ Turn 7: Recent work                    │
+│ Turn 8: Recent work                    │
+│ Turn 9: Current state                  │
+└────────────────────────────────────────┘
+```
+
+#### Termination Conditions
+
+The loop ends when:
+
+| Condition | Meaning | Status |
+|-----------|---------|--------|
+| No tool calls | LLM has finished, responds to user | `completed` |
+| Max turns reached | Safety limit (e.g., 50 turns) | `max_turns` |
+| Timeout | Time limit exceeded (e.g., 10 min) | `timeout` |
+| Fatal error | Unrecoverable error occurred | `error` |
+| User interrupt | User cancelled the task | `cancelled` |
+
 ### Level 2 Capabilities - Validated
 
 | Capability | Purpose | Test Results |
